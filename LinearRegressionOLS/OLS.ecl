@@ -20,9 +20,9 @@ t_FieldReal   := Types.t_FieldReal;
 t_Discrete    := Types.t_Discrete;
 t_Count       := Types.t_Count;
 empty_data := DATASET([], NumericField);
-tri := pbbTypes.triangle;
+triangle := pbbTypes.triangle;
 side := pbbTypes.side;
-diag := pbbTypes.diagonal;
+diagonal := pbbTypes.diagonal;
 /**
   * Ordinary Least Squares (OLS) Linear Regression
   *  aka Ordinary Linear Regression
@@ -73,10 +73,10 @@ EXPORT OLS(DATASET(NumericField) X=empty_data,
   DATASET(Layout_Cell) learnBetas := FUNCTION
     XtX := PBblas.gemm(TRUE, FALSE, 1.0, mX, mX);
     XtY := PBblas.gemm(TRUE, FALSE, 1.0, mX, mY);
-    L   := PBblas.potrf(tri.Lower, XtX);
-    s1  := PBblas.trsm(Side.Ax, tri.Lower, FALSE, diag.NotUnitTri, 1.0,
+    L   := PBblas.potrf(triangle.Lower, XtX);
+    s1  := PBblas.trsm(Side.Ax, triangle.Lower, FALSE, diagonal.NotUnitTri, 1.0,
                           L, XtY);
-    B:= PBblas.trsm(Side.Ax, tri.Upper, TRUE, diag.NotUnitTri, 1.0,
+    B:= PBblas.trsm(Side.Ax, triangle.Upper, TRUE, diagonal.NotUnitTri, 1.0,
                           L, s1);
     return B;
   END;
@@ -356,8 +356,14 @@ EXPORT OLS(DATASET(NumericField) X=empty_data,
   // our extended XTX will have shape M+1 x M+1, with one row and column per
   // coefficient.
   mXTX := PBblas.gemm(TRUE, FALSE, 1.0, mX, mX);
-  // Invert the matrix
-  mXTXinv := PBblas.Inverse(mXTX);
+  // Invert the matrix (solve for: XTX * X**-1 = X**T)
+  mXT := PBblas.tran(1.0, mX);
+  // Factor and two triangle solves gives us the solution for X**-1
+  mXTX_fact := PBblas.potrf(triangle.Lower, mXTX);
+  mXTX_S := PBblas.trsm(Side.Ax, Triangle.Lower, FALSE,
+                       diagonal.NotUnitTri, 1.0, mXTX_fact, mXT);
+  mXTXinv := PBblas.trsm(Side.Ax, triangle.Upper, TRUE,
+                       diagonal.NotUnitTri, 1.0, mXTX_fact, mXTX_S);
 
   // Scale each cell by multiplying by the ANOVA Mean Square Error to arrive
   // at the covariance matrix of the coefficients.
@@ -484,6 +490,33 @@ EXPORT OLS(DATASET(NumericField) X=empty_data,
             SELF.AIC := n * LN(LEFT.Error_SS / n) + 2 * p; 
             SELF := LEFT));
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  // Density vector
+  EXPORT RangeVec := RECORD
+    t_Count RangeNumber;
+    t_FieldReal RangeLow; // Values > RangeLow
+    t_FieldReal RangeHigh; // Values <= RangeHigh
+    t_FieldReal P;
+  END;
+  
   // The 'double' factorial is defined for ODD n and is the product of all the odd numbers up to and including that number
   // We are extending the meaning to even numbers to mean the product of the even numbers up to and including that number
   // Thus DoubleFac(8) = 8*6*4*2
@@ -497,11 +530,54 @@ EXPORT OLS(DATASET(NumericField) X=empty_data,
 	return accum;
   ENDC++;
   EXPORT Pi := 3.1415926535897932384626433;
+  
+  // We temporarily include code here for needed statistical distributions.
+  // This should be removed once we have a productized Distribution module.
+  EXPORT DefaultDist := MODULE,VIRTUAL
+    EXPORT RangeWidth := 1.0; // Only really works for discrete - the width of each range
+    EXPORT t_FieldReal Density(t_FieldReal RH) := 0.0; // Density function at stated point
+    // Generating functions are responsible for making these in ascending order
+    EXPORT DensityV() := DATASET([],RangeVec); // Probability of between >PreviosRangigh & <= RangeHigh
+    // Default CumulativeV works by simple integration of the DensityVec
+    EXPORT CumulativeV() := FUNCTION
+      d := DensityV();
+      RangeVec Accum(RangeVec le,RangeVec ri) := TRANSFORM
+        SELF.p := le.p+ri.p*RangeWidth;
+        SELF := ri;
+      END;
+      RETURN ITERATE(d,Accum(LEFT,RIGHT)); // Global iterates are horrible - but this should be tiny
+    END;
+    // Default Cumulative works from the Cumulative Vector
+    EXPORT t_FieldReal Cumulative(t_FieldReal RH) :=FUNCTION // Cumulative probability at stated point
+      cv := CumulativeV();
+      // If the range high value is at an intermediate point of a range then interpolate the result\
+      // Interpolation done as follows :
+      // cumulative(RH) = cumulative(v.RangeHigh) - prob(RH <= x < v.Rangehigh)
+      // prob(RH <= x < v.Rangehigh) =  Density((RH + Rangehigh)/2) * (RH - Rangehigh) [Rectangle Rule for integration]
+      InterC(RangeVec v) := IF ( RH=v.RangeHigh, v.P, v.P - Density((v.RangeHigh+RH)/2)*(v.RangeHigh - RH));
+      RETURN MAP( RH >= MAX(cv,RangeHigh) => 1.0,
+                  RH <= MIN(cv,RangeLow) => 0.0,
+                  InterC(cv(RH>RangeLow,RH<=RangeHigh)[1]) );
+    END;
+    // Default NTile works from the Cumulative Vector
+    EXPORT t_FieldReal NTile(t_FieldReal Pc) :=FUNCTION // Value of the Pc percentile
+      cp := Pc / 100.0; // Convert from percentile to cumulative probability
+      cv := CumulativeV();
+      // If the range high value is at an intermediate point of a range then interpolate the result
+      InterP(RangeVec v) := IF ( cp=v.P, v.RangeHigh, v.RangeHigh+(cp-v.p)/Density((v.RangeHigh+v.RangeLow)/2) );
+      RETURN MAP( cp >= MAX(cv,P) => MAX(cv,RangeHigh),
+                  cp <= 0.0 => MIN(cv,RangeLow),
+                  InterP(cv(P>=cp)[1]) );
+    END;
+    EXPORT InvDensity(t_FieldReal delta) := 0.0; //Only sensible for monotonic distributions
+    EXPORT Discrete := FALSE;
+  END;
+  
   // Student T distribution
   // This distribution is entirely symmetric about the mean - so we will model the >= 0 portion
   // Warning - v=1 tops out around the 99.5th percentile, 2+ is fine
 
-  EXPORT StudentT(t_Discrete v,t_Count NRanges = 10000) := MODULE
+  EXPORT StudentT(t_Discrete v,t_Count NRanges = 10000) := MODULE(DefaultDist)
     // Used for storing a vector of probabilities (usually cumulative)
     EXPORT Layout := RECORD
       t_Count RangeNumber;
@@ -520,20 +596,30 @@ EXPORT OLS(DATASET(NumericField) X=empty_data,
     EXPORT RangeWidth := (high-low)/NRanges;
     // Generating functions are responsible for making these in ascending order
     EXPORT t_FieldReal Density(t_FieldReal RH) := Multiplier * POWER( 1+RH*RH/v,-0.5*(v+1) );
-    EXPORT DensityV() := PROJECT(DVec(NRanges,low,RangeWidth),
-                         TRANSFORM(Layout,
-                           SELF.P := Density((LEFT.RangeLow+LEFT.RangeHigh)/2),
-                           SELF := LEFT));  
-    // Default CumulativeV works by simple integration of the DensityVec
+    EXPORT DATASET(RangeVec) DensityV() := FUNCTION
+      dummy := DATASET([{0,0,0,0}], RangeVec);
+      RangeVec make_density(RangeVec d, UNSIGNED c) := TRANSFORM
+        SELF.RangeNumber := c;
+        SELF.RangeLow := Low + (c-1) * RangeWidth;
+        SELF.RangeHigh := SELF.RangeLow + RangeWidth;
+        SELF.P := Density((SELF.RangeLow + SELF.RangeHigh) / 2);
+      END;
+      vec := NORMALIZE(dummy, Nranges, make_density(LEFT, COUNTER));
+      RETURN vec;
+    END;
     EXPORT CumulativeV() := FUNCTION
       d := DensityV();
+      // The general integration really doesn't work for v=1 and v=2 - fortunately there are 'nice' closed forms for the CDF for those values of v
       Layout Accum(Layout le,Layout ri) := TRANSFORM
-        SELF.p := le.p+ri.p*RangeWidth;
+        SELF.p := MAP( v = 1 => 0.5+ATAN(ri.RangeHigh)/PI, // Special case CDF for v = 1
+                       v = 2 => (1+ri.RangeHigh/SQRT(2+POWER(ri.RangeHigh,2)))/2, // Special case of CDF for v=2
+                       IF(le.p=0,0.5,le.p)+ ri.p*RangeWidth );
         SELF := ri;
       END;
+      
       RETURN ITERATE(d,Accum(LEFT,RIGHT)); // Global iterates are horrible - but this should be tiny
     END;
-    // Default Cumulative works from the Cumulative Vector
+    // Cumulative works from the Cumulative Vector
     EXPORT t_FieldReal Cumulative(t_FieldReal RH) :=FUNCTION // Cumulative probability at stated point
       cv := CumulativeV();
       // If the range high value is at an intermediate point of a range then interpolate the result\
@@ -545,21 +631,27 @@ EXPORT OLS(DATASET(NumericField) X=empty_data,
                 RH <= MIN(cv,RangeLow) => 0.0,
                 InterC(cv(RH>RangeLow,RH<=RangeHigh)[1]) );
     END;
-    /*
-    SHARED Multiplier := IF ( v & 1 = 0, Utils.DoubleFac(v-1)/(2*SQRT(v)*Utils.DoubleFac(v-2))
-                             , Utils.DoubleFac(v-1)/(Utils.Pi*SQRT(v)*Utils.DoubleFac(v-2)));
-    */
-    EXPORT CumulativeV() := FUNCTION
-      d := DensityV();
-      // The general integration really doesn't work for v=1 and v=2 - fortunately there are 'nice' closed forms for the CDF for those values of v
-      Layout Accum(Layout le,Layout ri) := TRANSFORM
-        SELF.p := MAP( v = 1 => 0.5+ATAN(ri.RangeHigh)/Utils.Pi, // Special case CDF for v = 1
-                       v = 2 => (1+ri.RangeHigh/SQRT(2+POWER(ri.RangeHigh,2)))/2, // Special case of CDF for v=2
-                       IF(le.p=0,0.5,le.p)+ ri.p*RangeWidth );
-        SELF := ri;
-      END;
-      RETURN ITERATE(d,Accum(LEFT,RIGHT)); // Global iterates are horrible - but this should be tiny
+    // Default NTile works from the Cumulative Vector
+    EXPORT t_FieldReal NTile(t_FieldReal Pc) :=FUNCTION // Value of the Pc percentile
+      cp := Pc / 100.0; // Convert from percentile to cumulative probability
+      cv := CumulativeV();
+      // If the range high value is at an intermediate point of a range then interpolate the result
+      InterP(Layout v) := IF ( cp=v.P, v.RangeHigh, v.RangeHigh+(cp-v.p)/Density((v.RangeHigh+v.RangeLow)/2) );
+      RETURN MAP( cp >= MAX(cv,P) => MAX(cv,RangeHigh),
+                  cp <= 0.0 => MIN(cv,RangeLow),
+                  InterP(cv(P>=cp)[1]) );
     END;
+  END;
+  EXPORT FDist(t_Discrete d1, t_Discrete d2, t_Count NRanges = 10000) := MODULE(DefaultDist)
+    SHARED Multiplier := (1 / Utils.Beta(d1/2, d2/2)) * POWER(d1/d2, d1/2);
+    SHARED high := 15;
+    SHARED Low := 0;
+    EXPORT RangeWidth := (high - low)/NRanges;
+    EXPORT t_FieldReal Density(t_FieldReal RH) := Multiplier * POWER(RH, d1/2 - 1) / POWER(1 + d1 * RH/d2, (d1 + d2)/2);
+    EXPORT DensityV() := PROJECT(DVec(NRanges,low,RangeWidth),
+                         TRANSFORM(Layout,
+                           SELF.P := Density((LEFT.RangeLow+LEFT.RangeHigh)/2),
+                           SELF := LEFT));  
   END;
   EXPORT dist := StudentT(Anova[1].Error_DF, 100000);
   
@@ -593,7 +685,7 @@ EXPORT OLS(DATASET(NumericField) X=empty_data,
     Types.t_FieldReal Model_F;
     Types.t_FIeldReal pValue;
   END;
-    
+
   EXPORT DATASET(FTestRec) FTest := PROJECT(Anova, TRANSFORM(FTestRec, SELF.Model_F := LEFT.Model_F;
                   dist := ML.Distribution.FDist(LEFT.Model_DF, LEFT.Error_DF, 100000);
                   SELF.pValue := 1 - dist.cumulative(LEFT.Model_F)));
