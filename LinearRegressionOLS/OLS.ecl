@@ -517,6 +517,9 @@ EXPORT OLS(DATASET(NumericField) X=empty_data,
     t_FieldReal P;
   END;
   
+  // We temporarily include code here for needed statistical distributions.
+  // This should be removed once we have a productized Distribution module.
+  // ********* START Temporary Statistical Distribution Section
   // The 'double' factorial is defined for ODD n and is the product of all the odd numbers up to and including that number
   // We are extending the meaning to even numbers to mean the product of the even numbers up to and including that number
   // Thus DoubleFac(8) = 8*6*4*2
@@ -531,8 +534,6 @@ EXPORT OLS(DATASET(NumericField) X=empty_data,
   ENDC++;
   EXPORT Pi := 3.1415926535897932384626433;
   
-  // We temporarily include code here for needed statistical distributions.
-  // This should be removed once we have a productized Distribution module.
   EXPORT DefaultDist := MODULE,VIRTUAL
     EXPORT RangeWidth := 1.0; // Only really works for discrete - the width of each range
     EXPORT t_FieldReal Density(t_FieldReal RH) := 0.0; // Density function at stated point
@@ -654,7 +655,9 @@ EXPORT OLS(DATASET(NumericField) X=empty_data,
                            SELF := LEFT));  
   END;
   EXPORT dist := StudentT(Anova[1].Error_DF, 100000);
+  // ******** END Temporary Statistical Distribution Section
   
+  // Calculate P-val
   NumericField pVal_transform(NumericField b) := TRANSFORM 
     SELF.value := 2 * ( 1 - dist.Cumulative(ABS(b.value))); 
     SELF := b;
